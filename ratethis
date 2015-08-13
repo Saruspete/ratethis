@@ -1,0 +1,196 @@
+#!/usr/bin/perl
+
+# #############################################################################
+# Find The Rate
+# #############################################################################
+#
+# This script parse program / input / files to get rates
+#
+# Useful for tools like /proc/interrupts, df, ifconfig, quota...
+#
+# #############################################################################
+# Features
+# - Stream (requires delimiter)
+# - Files (specify file)
+# - Binary (specify binary)
+#
+# Display
+# - Colors (up/down)
+# - Summary (avg,min,max)
+# #############################################################################
+
+
+use strict;
+use warnings;
+
+use Getopt::Long qw(:config no_ignore_case gnu_compat bundling permute auto_help);
+use Cwd;
+use File::Spec;
+
+
+
+# Auto configuration
+my %autoconf = (
+	'/proc/interrupts'	=> sub {
+		
+	},
+	'ifconfig' => (),
+	'iostat' => (),
+);
+
+
+
+
+my $opt_loop_wait = 1;
+my $opt_loop_countmax;
+my $opt_show_summary = 0;
+my $opt_show_onlymatching = 0;
+my $opt_show_colors = 0;
+my $opt_show_units = '';
+
+my $opt_config;
+my $opt_rgx_match = '\d+';
+my $opt_rgx_replace;
+
+# Source content
+my $opt_src;
+my $opt_src_exec;
+my $opt_src_stream;
+
+my $src_path;
+
+Getopt::Long::Configure('pass_through');
+GetOptions(
+	# Loop processing
+	'wait|w=i'		=> \$opt_loop_wait,
+	'count|c=i'		=> \$opt_loop_countmax,
+
+	# Output
+	'summary|s+'	=> \$opt_show_summary,
+	'onlymatch|o+'	=> \$opt_show_onlymatching,
+	'color|C+'		=> \$opt_show_colors,
+	'units|u=s'		=> \$opt_show_units,
+
+	# Configuration and matching
+	'autoconf|a=s'	=> \$opt_config,
+	'match|m=s'		=> \$opt_rgx_match,
+	'replace|r=s'	=> \$opt_rgx_replace,
+
+	# Source
+	'execute|x+'	=> \$opt_src_exec,
+#	'file|f=s'		=> \$opt_src_file,
+	'<>'			=> sub {
+		if (!$opt_src) {
+			$opt_src = $_[0];
+		}
+		else {
+			print "Only one file/process/stream\n";
+			exit 1;
+		}
+	},
+);
+
+# Check the input
+if (!($src_path = discover_input($opt_src))) {
+	if ($opt_src) {
+		print "Unable to find the file/exec/stream for '$opt_src'. Please check your input\n";
+	}
+	else {
+		print "Usage: ...\n";
+	}
+	exit 1;
+}
+
+# Add the requirement for executable
+if ((-x $src_path) || $opt_src_exec) {
+	$src_path .= "|";
+}
+
+
+# Containers for data
+my %src_stats;
+my %src_contents;
+
+# Main loop
+my $opt_loop_count = 0;
+while (!$opt_loop_countmax || $opt_loop_count < $opt_loop_countmax) {
+
+	my $content;
+	my $src_fh;
+	if ($src_path ne 'STDIN') {
+		open($src_fh, $src_path)
+			or die "Unable to open '$src_path' for parsing";
+	}
+	
+	# Processing input
+	while (my $line = ($src_fh) ? <$src_fh> : <STDIN>) {
+
+		print $line;
+		if ($opt_show_onlymatching) {
+
+		}
+	}
+	close($src_fh) if $src_fh;
+
+	# Next job next...
+	$opt_loop_count++;
+	print "== $opt_loop_count\n";
+	sleep($opt_loop_wait);
+}
+
+# End. Display summary if requested
+if ($opt_show_summary) {
+	
+}
+
+
+
+# ###############################################
+# Helpers and working stubs
+
+# Discovers which process is sending stream
+sub discover_stdinsrc {
+	use POSIX;
+	my $ppid = getppid();
+	my $tty = POSIX::ttyname(1);
+	
+	return;
+}
+
+# Discover the real file/process
+sub discover_input {
+	my ($input) = @_;
+
+	return if !$input;
+
+	my $confkey;
+	if ($input eq '-') {
+		return 'STDIN';
+	}
+	elsif (-f $input) {
+		return Cwd::abs_path($input);
+	}
+	else {
+		# Search for a process in $PATH
+		foreach my $p (File::Spec->path()) {
+			my $bin = File::Spec->catfile($p,$input);
+			if (-x $bin) {
+				return $bin;
+			}
+		}
+	}
+
+	return;
+}
+
+
+sub show_change {
+	my ($old, $new) = @_;
+	
+	return 0;
+}
+
+sub show_stats {
+	my ($data) = @_;
+}
+
