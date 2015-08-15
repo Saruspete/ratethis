@@ -1,32 +1,57 @@
 #!/usr/bin/perl
 
-# #############################################################################
-# Find The Rate
-# #############################################################################
-#
-# This script parse program / input / files to get rates
-#
-# Useful for tools like /proc/interrupts, df, ifconfig, quota...
-#
-# #############################################################################
-# Features
-# - Stream (requires delimiter)
-# - Files (specify file)
-# - Binary (specify binary)
-#
-# Display
-# - Colors (up/down)
-# - Summary (avg,min,max)
-# #############################################################################
+# ###################################################################
+=pod
 
+=head1 NAME
+
+ratethis - Find the rate of generic text
+
+Useful for /proc/interrupts, df, ifconfig, quota...
+
+=head1 DESCRIPTION
+
+This script parse program / input / files to get rates
+
+=head1 SYNOPSIS
+
+ratethis [options] < command | file | - >
+
+ratethis -S -- /proc/interrupts
+ratethis -S -- df -h
+
+=head2 USAGE
+
+ Options:
+   -h, --help       Display this help
+   -V, --version    Display version of the tool
+
+   -S, --stats      Display statistics at the end of the run
+   -C, --colors     Display colors 
+
+   -O, --onlymatch  Display only matching lines
+   -c, --config     Use the specified internal configuration (see help)
+   -s, --separator  Set the separator (default = \s+)
+   -m, --match      Set the pattern to be matched against
+
+=head1 AUTHOR
+
+Adrien Mahieux <adrien.mahieux@gmail.com>
+
+https://github.com/Saruspete/ratethis
+
+=cut
+# ###################################################################
 
 use strict;
 use warnings;
 
+use Pod::Usage;
 use Getopt::Long qw(:config no_ignore_case gnu_compat bundling permute auto_help);
 use Cwd;
 use File::Spec;
-
+use POSIX;
+use Data::Dumper;
 
 
 # Auto configuration
@@ -38,22 +63,41 @@ my %autoconf = (
 	'iostat' => (),
 );
 
+# Color and term management
+my $_cls = `clear`;
+my $_esc = "";
+my %COLORS = (
+	BG_DEFAULT	=> $_esc.'[49m',
+	FG_DEFAULT	=> $_esc.'[39m',
+	BG_RED		=> $_esc.'[41m',
+	FG_RED		=> $_esc.'[31m',
+	BG_GREEN	=> $_esc.'[42m',
+	FG_GREEN	=> $_esc.'[32m',
+	BG_WHITE	=> $_esc.'[47m',
+	FG_WHITE	=> $_esc.'[37m',
+	RESET		=> $_esc.'[0m',
+	BOLD		=> $_esc.'[1m',
+	UNDERLINE	=> $_esc.'[4m',
+);
 
 
 
 my $opt_loop_wait = 1;
 my $opt_loop_countmax;
-my $opt_show_summary = 0;
+my $opt_show_stats = 0;
 my $opt_show_onlymatching = 0;
-my $opt_show_colors = 0;
-my $opt_show_units = '';
+my $opt_show_colors = 1;
+#my $opt_show_units = '';
+
+my $opt_show_help = 0;
+my $opt_show_version = 0;
 
 my $opt_config;
-my $opt_rgx_match = '\d+';
-my $opt_rgx_replace;
+my $opt_rgx_match = '[0-9]+(:?,|\.[0-9]+)?';
+my $opt_rgx_separator = '\s+';
 
 # Source content
-my $opt_src;
+my @opt_src;
 my $opt_src_exec;
 my $opt_src_stream;
 
@@ -63,57 +107,69 @@ Getopt::Long::Configure('pass_through');
 GetOptions(
 	# Loop processing
 	'wait|w=i'		=> \$opt_loop_wait,
-	'count|c=i'		=> \$opt_loop_countmax,
+	'loops|l=i'		=> \$opt_loop_countmax,
+	
+	# Help
+	'help|h+'		=> \$opt_show_help,
+	'version|V+'	=> \$opt_show_version,
 
 	# Output
-	'summary|s+'	=> \$opt_show_summary,
-	'onlymatch|o+'	=> \$opt_show_onlymatching,
-	'color|C+'		=> \$opt_show_colors,
-	'units|u=s'		=> \$opt_show_units,
+	'stats|S+'		=> \$opt_show_stats,
+	'nocolor|C'		=> sub { $opt_show_colors = 0; },
+#	'units|U=s'		=> \$opt_show_units,
+	'onlymatch|O+'	=> \$opt_show_onlymatching,
 
 	# Configuration and matching
-	'autoconf|a=s'	=> \$opt_config,
+	'autoconf|c=s'	=> \$opt_config,
 	'match|m=s'		=> \$opt_rgx_match,
-	'replace|r=s'	=> \$opt_rgx_replace,
+	'separator|s=s'	=> \$opt_rgx_separator,
 
 	# Source
 	'execute|x+'	=> \$opt_src_exec,
 #	'file|f=s'		=> \$opt_src_file,
-	'<>'			=> sub {
-		if (!$opt_src) {
-			$opt_src = $_[0];
-		}
-		else {
-			print "Only one file/process/stream\n";
-			exit 1;
-		}
-	},
 );
 
+# Options not parsed are considered as command
+shift(@ARGV) if ($ARGV[0] eq '--');
+@opt_src = @ARGV;
+
+
+# Display help
+if ($opt_show_help) {
+	show_help();
+	exit 1;
+}
+
+
+
 # Check the input
-if (!($src_path = discover_input($opt_src))) {
-	if ($opt_src) {
-		print "Unable to find the file/exec/stream for '$opt_src'. Please check your input\n";
+if (!($src_path = discover_input(\@opt_src))) {
+	if (@opt_src) {
+		print STDERR "Unable to find the file/exec/stream for '".join(" ",@opt_src)."'.\nPlease check your input\n";
 	}
 	else {
-		print "Usage: ...\n";
+		show_usage();
 	}
 	exit 1;
 }
 
-# Add the requirement for executable
-if ((-x $src_path) || $opt_src_exec) {
-	$src_path .= "|";
-}
-
-
 # Containers for data
-my %src_stats;
-my %src_contents;
+my @src_stats;
+my @src_lastvalues;
+my $src_regex = '(?:^|'.$opt_rgx_separator.'?)' .
+				'('.$opt_rgx_match.')' .
+				'(?:'.$opt_rgx_separator.'?|$)';
+
+# Signal handling
+$SIG{TERM} = 
+$SIG{INT} = 
+$SIG{ABRT} = \&sig_handler;
 
 # Main loop
 my $opt_loop_count = 0;
-while (!$opt_loop_countmax || $opt_loop_count < $opt_loop_countmax) {
+my $loop_continue = 1;
+while ( $loop_continue && 
+		(!$opt_loop_countmax || $opt_loop_count < $opt_loop_countmax)) {
 
 	my $content;
 	my $src_fh;
@@ -121,36 +177,104 @@ while (!$opt_loop_countmax || $opt_loop_count < $opt_loop_countmax) {
 		open($src_fh, $src_path)
 			or die "Unable to open '$src_path' for parsing";
 	}
-	
-	# Processing input
+
+	# Reset term and print header
+	print $_cls 
+		. $COLORS{BOLD}."== ratethis - "
+		. strftime("%y-%m-%d %H:%M:%S", localtime)
+		. " - Every ${opt_loop_wait} sec - $src_path $COLORS{RESET}\n";
+
+
+	# Processing each input line
+	my $ln = 0;
 	while (my $line = ($src_fh) ? <$src_fh> : <STDIN>) {
+		chomp($line);
 
-		print $line;
-		if ($opt_show_onlymatching) {
-
+		# Process each match
+		my @values;
+		while ($line =~ /$src_regex/ogi) {
+			push(@values, {
+				val => $1,
+				beg => $-[1],
+				end => $+[1],
+				len => $+[1] - $-[1],
+			});
 		}
+
+		# skip empty results
+		next if !@values && $opt_show_onlymatching;
+
+		# Get rates
+		my @rates = @{parse_rate($opt_loop_wait, \@values, $src_lastvalues[$ln])};
+
+		# Get output
+		print parse_line($line, $src_regex, \@values, \@rates)."\n";
+
+		# Get some statistics if requested
+		if ($opt_show_stats) {
+			for(my $en=0; $en<@values; $en++) {
+				$src_stats[$ln][$en]{min}  = min($src_stats[$ln][$en]{min}, $values[$en]->{val});
+				$src_stats[$ln][$en]{max}  = max($src_stats[$ln][$en]{max}, $values[$en]->{val});
+				# rates for first iteration are unwanted
+				if ($opt_loop_count > 0) {
+					$src_stats[$ln][$en]{rmin} = min($src_stats[$ln][$en]{rmin}, $rates[$en]);
+					$src_stats[$ln][$en]{rmax} = max($src_stats[$ln][$en]{rmax}, $rates[$en]);
+				}
+			}
+		}
+
+
+
+
+		# save results for next iteration
+		$src_lastvalues[$ln] = \@values;
+		$ln++;
 	}
 	close($src_fh) if $src_fh;
 
 	# Next job next...
 	$opt_loop_count++;
-	print "== $opt_loop_count\n";
 	sleep($opt_loop_wait);
 }
 
-# End. Display summary if requested
-if ($opt_show_summary) {
-	
+
+# End. Display stats if requested
+if ($opt_show_stats) {
+	print "Statistics...\n";
+	print "$opt_loop_count iterations, every $opt_loop_wait seconds\n\n";
+	print "Output of each matched element : min/max/ratemin/ratemax\n\n";
+	for(my $i=0; $i<@src_stats; $i++) {
+		for(my $j=0; defined($src_stats[$i]) && $j<$src_stats[$i]; $j++) {
+			my %e = %{$src_stats[$i][$j]};
+			print "$e{min}/$e{max}/$e{rmin}/$e{rmax}\t";
+		}
+		print "\n";
+	}
+
+}
+
+
+
+
+
+# ###############################################
+#  Help and usage
+
+sub show_usage {
+	pod2usage(-verbose => 1);
+}
+
+sub show_help {
+	pod2usage(-verbose => 2);
 }
 
 
 
 # ###############################################
-# Helpers and working stubs
+# Discovering
 
 # Discovers which process is sending stream
 sub discover_stdinsrc {
-	use POSIX;
 	my $ppid = getppid();
 	my $tty = POSIX::ttyname(1);
 	
@@ -159,11 +283,11 @@ sub discover_stdinsrc {
 
 # Discover the real file/process
 sub discover_input {
-	my ($input) = @_;
+	my ($inputs) = @_;
+	my $input = join(' ', @$inputs);
 
 	return if !$input;
 
-	my $confkey;
 	if ($input eq '-') {
 		return 'STDIN';
 	}
@@ -171,11 +295,15 @@ sub discover_input {
 		return Cwd::abs_path($input);
 	}
 	else {
+		# Split the input in case of process options
+		my @parts = @$inputs;
+		my $binpart = shift(@parts);
+
 		# Search for a process in $PATH
 		foreach my $p (File::Spec->path()) {
-			my $bin = File::Spec->catfile($p,$input);
-			if (-x $bin) {
-				return $bin;
+			my $bin = File::Spec->catfile($p,$binpart);
+			if (-x $bin && ! -d $bin) {
+				return join(' ', $bin, @parts, "|");
 			}
 		}
 	}
@@ -184,13 +312,98 @@ sub discover_input {
 }
 
 
-sub show_change {
-	my ($old, $new) = @_;
-	
-	return 0;
+# ###############################################
+# Parsing and processing
+sub parse_rate {
+	my ($sleep, $new, $old) = @_;
+
+	my @rate;
+	for (my $col=0; $col<@$new; $col++) {
+		$rate[$col] = ($old->[$col])
+			? ($new->[$col]->{val} - $old->[$col]->{val}) / $sleep
+			: $new->[$col]->{val};
+	}
+	return \@rate;
 }
 
-sub show_stats {
+# 
+sub parse_line {
+	my ($line, $rgx, $vals, $rates) = @_;
+
+	my $output = '';
+	my $offset = 0;
+	my $lastval = {};
+	
+	for (my $i=0; $i<@$vals; $i++) {
+		my $v = $vals->[$i];
+		my $value = $v->{val};
+		my $rate = (defined $rates->[$i]) ? $rates->[$i] : $value;
+		
+		my $lv = $v->{len};
+		my $lr = length($rate);
+		
+		$offset = $v->{beg};
+		my $offset_prev = $lastval->{end} || 0;
+		
+		# Get the content before our match (if any)
+		if ($offset > 0 && $offset_prev+1 != $offset) {
+			$output .= substr($line, $offset_prev, $offset-$offset_prev);
+		}
+		
+		#Add a padding
+		if ($lv > $lr) {
+			if ($offset > 0) {
+				my $lastchar = substr($line,$offset-1,1);
+				$output .= $lastchar x ($lv-$lr);
+			}
+		}
+		# Cut some previous chars
+		elsif($lv < $lr) {
+			$output .= "\b"x($lr-$lv);
+		}
+		else {
+			# Nothing to do
+		}
+		
+		# Create the final output with colors
+		if ($opt_show_colors) {
+			my $colr = 'FG_DEFAULT';
+			if ($rates->[$i]) {
+				$colr = ($rate > 0) ? 'BG_GREEN' :
+						($rate < 0) ? 'BG_RED' :
+									'BG_WHITE';
+			}
+
+			$output .= $COLORS{$colr}.$COLORS{UNDERLINE}.
+						$rate.
+						$COLORS{RESET};
+
+		}
+		# Or without color
+		else {
+			$output .= $rate;
+		}
+
+		# Save the last value
+		$lastval = $v;
+	}
+	
+	# Add current 
+	return $output.substr($line, $lastval->{end} || 0);
+}
+
+
+
+sub parse_stats {
 	my ($data) = @_;
 }
 
+sub sig_handler {
+	my ($sig) = @_;
+	$loop_continue = 0;
+}
+
+#sub min ($$) { $_[$_[0] > $_[1]] }
+#sub max ($$) { $_[$_[0] < $_[1]] }
+sub max ($$) { if (defined($_[0])) { return $_[$_[0] < $_[1]]; } else { return $_[1]; } }
+sub min ($$) { if (defined($_[0])) { return $_[$_[0] > $_[1]]; } else { return $_[1]; } }
