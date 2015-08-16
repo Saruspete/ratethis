@@ -27,7 +27,8 @@ ratethis -S -- df -h
    -V, --version    Display version of the tool
 
    -S, --stats      Display statistics at the end of the run
-   -C, --colors     Display colors 
+   -C, --nocolor    Do not display colorful results
+   -H, --noheader   Do not display header on top of iterations results
 
    -O, --onlymatch  Display only matching lines
    -c, --config     Use the specified internal configuration (see help)
@@ -87,6 +88,7 @@ my $opt_loop_countmax;
 my $opt_show_stats = 0;
 my $opt_show_onlymatching = 0;
 my $opt_show_colors = 1;
+my $opt_show_header = 1;
 #my $opt_show_units = '';
 
 my $opt_show_help = 0;
@@ -116,6 +118,7 @@ GetOptions(
 	# Output
 	'stats|S+'		=> \$opt_show_stats,
 	'nocolor|C'		=> sub { $opt_show_colors = 0; },
+	'noheader|h'	=> sub { $opt_show_header = 0; },
 #	'units|U=s'		=> \$opt_show_units,
 	'onlymatch|O+'	=> \$opt_show_onlymatching,
 
@@ -179,10 +182,12 @@ while ( $loop_continue &&
 	}
 
 	# Reset term and print header
-	print $_cls 
-		. $COLORS{BOLD}."== ratethis - "
-		. strftime("%y-%m-%d %H:%M:%S", localtime)
-		. " - Every ${opt_loop_wait} sec - $src_path $COLORS{RESET}\n";
+	print $_cls;
+	if ($opt_show_header) {
+		print . $COLORS{BOLD}."== ratethis - "
+			. strftime("%y-%m-%d %H:%M:%S", localtime)
+			. " - Every ${opt_loop_wait} sec - $src_path $COLORS{RESET}\n";
+	}
 
 
 	# Processing each input line
