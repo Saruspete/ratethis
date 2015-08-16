@@ -184,7 +184,7 @@ while ( $loop_continue &&
 	# Reset term and print header
 	print $_cls;
 	if ($opt_show_header) {
-		print . $COLORS{BOLD}."== ratethis - "
+		print $COLORS{BOLD}."== ratethis - "
 			. strftime("%y-%m-%d %H:%M:%S", localtime)
 			. " - Every ${opt_loop_wait} sec - $src_path $COLORS{RESET}\n";
 	}
