@@ -1,5 +1,5 @@
 #!/usr/bin/perl
-
+# vim: ts=4
 # ###################################################################
 =pod
 
@@ -11,14 +11,16 @@ Useful for /proc/interrupts, df, ifconfig, quota...
 
 =head1 DESCRIPTION
 
-This script parse program / input / files to get rates
+This script parse program / files / stream to find and display
+evolution rates between 2 iterations
 
 =head1 SYNOPSIS
 
 ratethis [options] < command | file | - >
 
-ratethis -S -- /proc/interrupts
+ratethis /proc/interrupts
 ratethis -S -- df -h
+
 
 =head2 USAGE
 
@@ -29,6 +31,7 @@ ratethis -S -- df -h
    -S, --stats      Display statistics at the end of the run
    -C, --nocolor    Do not display colorful results
    -H, --noheader   Do not display header on top of iterations results
+   -f, --filestats  File where to log statistics
 
    -O, --onlymatch  Display only matching lines
    -c, --config     Use the specified internal configuration (see help)
@@ -82,10 +85,10 @@ my %COLORS = (
 );
 
 
-
 my $opt_loop_wait = 1;
 my $opt_loop_countmax;
 my $opt_show_stats = 0;
+my $opt_show_normalize = 0;
 my $opt_show_onlymatching = 0;
 my $opt_show_colors = 1;
 my $opt_show_header = 1;
@@ -94,9 +97,11 @@ my $opt_show_header = 1;
 my $opt_show_help = 0;
 my $opt_show_version = 0;
 
+my $opt_file_stats;
+
 my $opt_config;
 my $opt_rgx_match = '[0-9]+(:?,|\.[0-9]+)?';
-my $opt_rgx_separator = '\s+';
+my $opt_rgx_separator = '\s';
 
 # Source content
 my @opt_src;
@@ -117,13 +122,15 @@ GetOptions(
 
 	# Output
 	'stats|S+'		=> \$opt_show_stats,
+	'filestats|f=s'	=> \$opt_file_stats,
+	'normalize|N'	=> \$opt_show_normalize,
 	'nocolor|C'		=> sub { $opt_show_colors = 0; },
 	'noheader|h'	=> sub { $opt_show_header = 0; },
 #	'units|U=s'		=> \$opt_show_units,
 	'onlymatch|O+'	=> \$opt_show_onlymatching,
 
 	# Configuration and matching
-	'autoconf|c=s'	=> \$opt_config,
+	'config|c=s'	=> \$opt_config,
 	'match|m=s'		=> \$opt_rgx_match,
 	'separator|s=s'	=> \$opt_rgx_separator,
 
@@ -159,21 +166,39 @@ if (!($src_path = discover_input(\@opt_src))) {
 # Containers for data
 my @src_stats;
 my @src_lastvalues;
-my $src_regex = '(?:^|'.$opt_rgx_separator.'?)' .
-				'('.$opt_rgx_match.')' .
-				'(?:'.$opt_rgx_separator.'?|$)';
+my $src_regex = "(?:^|(?<=$opt_rgx_separator))($opt_rgx_match)(?:$opt_rgx_separator|\$)";
 
 # Signal handling
 $SIG{TERM} = 
 $SIG{INT} = 
 $SIG{ABRT} = \&sig_handler;
 
-# Main loop
-my $opt_loop_count = 0;
-my $loop_continue = 1;
-while ( $loop_continue && 
-		(!$opt_loop_countmax || $opt_loop_count < $opt_loop_countmax)) {
 
+# Time processing
+my $loop_timehighres;
+my $loop_timeconsumed = 0;
+my @loop_timestart;
+my $loop_sleepfunc = \&POSIX::sleep;
+eval 'use Time::HiRes qw(gettimeofday)';
+if (!$@) {
+	$loop_timehighres = 1;
+	$loop_sleepfunc = \&Time::HiRes::usleep;
+}
+
+# Main loop
+my $loop_count = 0;
+my $loop_continue = 1;
+my $loop_sleeptime = $opt_loop_wait;
+my $loop_normrate = ($opt_show_normalize) ? $opt_loop_wait : 1;
+while ( $loop_continue && 
+		(!$opt_loop_countmax || $loop_count < $opt_loop_countmax)) {
+
+	# Timing for better accuracy
+	if (!$loop_timeconsumed && $loop_timehighres && $loop_count % 10 eq 0) {
+		@loop_timestart = gettimeofday();
+	}
+
+	# Data processing
 	my $content;
 	my $src_fh;
 	if ($src_path ne 'STDIN') {
@@ -186,11 +211,14 @@ while ( $loop_continue &&
 	if ($opt_show_header) {
 		print $COLORS{BOLD}."== ratethis - "
 			. strftime("%y-%m-%d %H:%M:%S", localtime)
-			. " - Every ${opt_loop_wait} sec - $src_path $COLORS{RESET}\n";
+			. " - Every ${opt_loop_wait} sec"
+			. (($opt_show_normalize && $opt_loop_wait != 1) ? ' (disp. unit: 1sec)' : '' )
+			. " - $src_path $COLORS{RESET}\n";
 	}
 
-
+	#
 	# Processing each input line
+	#
 	my $ln = 0;
 	while (my $line = ($src_fh) ? <$src_fh> : <STDIN>) {
 		chomp($line);
@@ -210,7 +238,7 @@ while ( $loop_continue &&
 		next if !@values && $opt_show_onlymatching;
 
 		# Get rates
-		my @rates = @{parse_rate($opt_loop_wait, \@values, $src_lastvalues[$ln])};
+		my @rates = @{parse_rate($loop_normrate, \@values, $src_lastvalues[$ln])};
 
 		# Get output
 		print parse_line($line, $src_regex, \@values, \@rates)."\n";
@@ -221,14 +249,12 @@ while ( $loop_continue &&
 				$src_stats[$ln][$en]{min}  = min($src_stats[$ln][$en]{min}, $values[$en]->{val});
 				$src_stats[$ln][$en]{max}  = max($src_stats[$ln][$en]{max}, $values[$en]->{val});
 				# rates for first iteration are unwanted
-				if ($opt_loop_count > 0) {
+				if ($loop_count > 0) {
 					$src_stats[$ln][$en]{rmin} = min($src_stats[$ln][$en]{rmin}, $rates[$en]);
 					$src_stats[$ln][$en]{rmax} = max($src_stats[$ln][$en]{rmax}, $rates[$en]);
 				}
 			}
 		}
-
-
 
 
 		# save results for next iteration
@@ -237,16 +263,38 @@ while ( $loop_continue &&
 	}
 	close($src_fh) if $src_fh;
 
-	# Next job next...
-	$opt_loop_count++;
-	sleep($opt_loop_wait);
+	#
+	# Timing processing end
+	#
+	if (!$loop_timeconsumed && $loop_timehighres) {
+		my @loop_timestop = gettimeofday();
+
+		$loop_timeconsumed = ($loop_timestop[0] - $loop_timestart[0])	# Seconds
+							+($loop_timestop[1] - $loop_timestart[1]);	# Microseconds
+
+		# If processing took more than 1 sec, there will be too much jitter.
+		if ($loop_timeconsumed > 1000000) {
+			# Disable high-res
+			$loop_timehighres = 0;
+		}
+		else {
+			# Convert to usec - processing time
+			$loop_sleeptime = $opt_loop_wait * 1000000 - $loop_timeconsumed;
+		}
+	}
+
+	#
+	# Wait for next job...
+	#
+	&$loop_sleepfunc($loop_sleeptime);
+	$loop_count++;
 }
 
 
 # End. Display stats if requested
 if ($opt_show_stats) {
 	print "Statistics...\n";
-	print "$opt_loop_count iterations, every $opt_loop_wait seconds\n\n";
+	print "$loop_count iterations, every $opt_loop_wait seconds\n\n";
 	print "Output of each matched element : min/max/ratemin/ratemax\n\n";
 	for(my $i=0; $i<@src_stats; $i++) {
 		for(my $j=0; defined($src_stats[$i]) && $j<$src_stats[$i]; $j++) {
@@ -316,7 +364,6 @@ sub discover_input {
 	return;
 }
 
-
 # ###############################################
 # Parsing and processing
 sub parse_rate {
@@ -338,38 +385,39 @@ sub parse_line {
 	my $output = '';
 	my $offset = 0;
 	my $lastval = {};
-	
+
 	for (my $i=0; $i<@$vals; $i++) {
 		my $v = $vals->[$i];
 		my $value = $v->{val};
 		my $rate = (defined $rates->[$i]) ? $rates->[$i] : $value;
-		
+
 		my $lv = $v->{len};
 		my $lr = length($rate);
-		
+
 		$offset = $v->{beg};
 		my $offset_prev = $lastval->{end} || 0;
-		
+
 		# Get the content before our match (if any)
-		if ($offset > 0 && $offset_prev+1 != $offset) {
+		if ($offset > 0 && $offset_prev != $offset) {
 			$output .= substr($line, $offset_prev, $offset-$offset_prev);
 		}
-		
+
 		#Add a padding
 		if ($lv > $lr) {
 			if ($offset > 0) {
-				my $lastchar = substr($line,$offset-1,1);
-				$output .= $lastchar x ($lv-$lr);
+				#my $lastchar = substr($line,$offset-1,1);
+				#$output .= $lastchar x ($lv-$lr);
+				$output .= ' ' x ($lv-$lr);
 			}
 		}
 		# Cut some previous chars
 		elsif($lv < $lr) {
 			$output .= "\b"x($lr-$lv);
 		}
+		# Nothing to do
 		else {
-			# Nothing to do
 		}
-		
+
 		# Create the final output with colors
 		if ($opt_show_colors) {
 			my $colr = 'FG_DEFAULT';
@@ -397,11 +445,6 @@ sub parse_line {
 	return $output.substr($line, $lastval->{end} || 0);
 }
 
-
-
-sub parse_stats {
-	my ($data) = @_;
-}
 
 sub sig_handler {
 	my ($sig) = @_;
