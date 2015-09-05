@@ -100,7 +100,7 @@ my $opt_show_version = 0;
 my $opt_file_stats;
 
 my $opt_config;
-my $opt_rgx_match = '[0-9]+(:?,|\.[0-9]+)?';
+my $opt_rgx_match = '[0-9]+(:?,|\.[0-9]+)?[kKmMgGtTpPeEzZ]?';
 my $opt_rgx_separator = '\s';
 
 # Source content
@@ -227,7 +227,7 @@ while ( $loop_continue &&
 		my @values;
 		while ($line =~ /$src_regex/ogi) {
 			push(@values, {
-				val => $1,
+				val => parse_unit($1),
 				beg => $-[1],
 				end => $+[1],
 				len => $+[1] - $-[1],
@@ -377,6 +377,31 @@ sub parse_rate {
 	}
 	return \@rate;
 }
+
+sub parse_unit {
+	my ($size) = @_;
+
+	my %units_coefs = (
+		b	=> 1,
+		c	=> 512,
+		k	=> 1024,
+		m	=> 1024*1024,
+		g	=> 1024*1024*1024,
+		t	=> 1024*1024*1024*1024,
+		p	=> 1024*1024*1024*1024*1024,
+		e	=> 1024*1024*1024*1024*1024*1024,
+		z	=> 1024*1024*1024*1024*1024*1024*1024,
+	);
+
+	$size =~ s/,/./;
+
+	my $unit = lc(substr($size, -1, 1));
+	my $coef = $units_coefs{$unit} || 1;
+	$size =~ s/[^0-9\.]//g;
+
+	return $size * $coef;
+}
+
 
 # 
 sub parse_line {
